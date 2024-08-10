@@ -1,6 +1,7 @@
 from flask import Flask, jsonify
 import pybaseball as pb
 import pandas as pd
+from datetime import datetime, timedelta
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -8,6 +9,50 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     return "Welcome to the Baseball Stats API!"
+
+@app.route('/recent_games/<string:team>', methods=['GET'])
+def recent_games(team):
+    try:
+        # Fetch schedule and record data for the specified year and team
+        current_date = datetime.now()
+        year = current_date.year
+        data = pb.schedule_and_record(year, team)
+        
+        if data.empty:
+            return jsonify({"error": "No data found for the specified year and team"}), 404
+        
+        # Debugging: print the first few rows of the data
+        print("Data preview:", data.head())
+
+        # Add the year to the 'Date' column and convert it to datetime
+        data['Date'] = data['Date'].apply(lambda d: f"{d}, {year}")  # Add year to date
+        data['Date'] = pd.to_datetime(data['Date'], format='%A, %b %d, %Y', errors='coerce')
+        
+        # Debugging: print the first few rows after conversion
+        print("Data with converted dates:", data.head())
+
+        # Calculate the date one month ago from today
+        one_month_ago = datetime.now() - timedelta(days=15)
+        
+        # Debugging: print the date range for filtering
+        print("Filtering data from:", one_month_ago)
+
+        # Filter data to include only records from the last month
+        recent_data = data[(data['Date'] >= one_month_ago) & (data['Date'] < current_date)]
+
+        
+        # Debugging: print the filtered data
+        print("Filtered data:", recent_data)
+
+        if recent_data.empty:
+            return jsonify({"error": "No data found for the last month"}), 404
+
+        # Process the data as needed (you can add specific processing here)
+        processed_data = recent_data.to_dict(orient='records')
+        
+        return jsonify(processed_data), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route('/id/<string:firstName>/<string:lastName>', methods=['GET'])
 def get_player_id(firstName, lastName):
@@ -21,7 +66,7 @@ def get_player_id(firstName, lastName):
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/check/<int:player_id>', methods=['GET'])
+@app.route('/stats/pitcher/by_arsenal/<int:player_id>', methods=['GET'])
 def check_player_stats(player_id):
     try:
         # Fetch pitcher data for the year 2024
@@ -45,7 +90,7 @@ def check_player_stats(player_id):
 
 
 
-@app.route('/stats/pitcher/count/<int:player_id>', methods=['GET'])
+@app.route('/stats/pitcher/by_count/<int:player_id>', methods=['GET'])
 def get_player_stats(player_id):
     try:
         # Fetch pitcher data for the specified date range
