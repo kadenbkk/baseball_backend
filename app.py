@@ -2,6 +2,7 @@ from flask import Flask, jsonify
 import pybaseball as pb
 import pandas as pd
 from datetime import datetime, timedelta
+from pybaseball import statcast_pitcher_spin
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -10,49 +11,6 @@ app = Flask(__name__)
 def home():
     return "Welcome to the Baseball Stats API!"
 
-@app.route('/recent_games/<string:team>', methods=['GET'])
-def recent_games(team):
-    try:
-        # Fetch schedule and record data for the specified year and team
-        current_date = datetime.now()
-        year = current_date.year
-        data = pb.schedule_and_record(year, team)
-        
-        if data.empty:
-            return jsonify({"error": "No data found for the specified year and team"}), 404
-        
-        # Debugging: print the first few rows of the data
-        print("Data preview:", data.head())
-
-        # Add the year to the 'Date' column and convert it to datetime
-        data['Date'] = data['Date'].apply(lambda d: f"{d}, {year}")  # Add year to date
-        data['Date'] = pd.to_datetime(data['Date'], format='%A, %b %d, %Y', errors='coerce')
-        
-        # Debugging: print the first few rows after conversion
-        print("Data with converted dates:", data.head())
-
-        # Calculate the date one month ago from today
-        one_month_ago = datetime.now() - timedelta(days=15)
-        
-        # Debugging: print the date range for filtering
-        print("Filtering data from:", one_month_ago)
-
-        # Filter data to include only records from the last month
-        recent_data = data[(data['Date'] >= one_month_ago) & (data['Date'] < current_date)]
-
-        
-        # Debugging: print the filtered data
-        print("Filtered data:", recent_data)
-
-        if recent_data.empty:
-            return jsonify({"error": "No data found for the last month"}), 404
-
-        # Process the data as needed (you can add specific processing here)
-        processed_data = recent_data.to_dict(orient='records')
-        
-        return jsonify(processed_data), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
 
 @app.route('/id/<string:firstName>/<string:lastName>', methods=['GET'])
 def get_player_id(firstName, lastName):
@@ -66,35 +24,128 @@ def get_player_id(firstName, lastName):
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
-@app.route('/stats/pitcher/by_arsenal/<int:player_id>', methods=['GET'])
-def check_player_stats(player_id):
+@app.route('/all/pitchers', methods=['GET'])
+def get_team_ids():
     try:
-        # Fetch pitcher data for the year 2024
-        data = pb.statcast_pitcher_arsenal_stats(2024)
-        
-        if data.empty:
-            return jsonify({"error": "No data found for the specified year"}), 404
-        
-        # Filter the data to only include the specified player_id
-        player_data = data[data['player_id'] == player_id]
-        
-        if player_data.empty:
-            return jsonify({"error": "No data found for the specified player_id"}), 404
-        
-        # Process the data as needed (you can add specific processing here)
-        processed_data = player_data.to_dict(orient='records')
-        
-        return jsonify(processed_data), 200
+        # Fetch the team pitching data
+        team_data = pb.team_pitching_bref('MIA', 2024)
+
+        # Convert the data to a list of dictionaries
+        raw_data = team_data.to_dict(orient='records')
+
+        # Filter out players with "40-man" or "60-day IL" in their names
+        filtered_data = [
+            player for player in raw_data
+            if not ("40-man" in player['Name'] or "60-day IL" in player['Name'] or "DFA" in player['Name'])
+        ]
+
+        # Extract pitcher names from the filtered data
+        pitcher_names = [player['Name'] for player in filtered_data]
+
+        # Prepare the response
+        response = {
+            "data": filtered_data,
+            "pitcher_names": pitcher_names
+        }
+
+        return jsonify(response), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route('/stats/pitcher/by_arsenal/<int:player_id>', methods=['GET'])
+def check_player_stats(player_id):
+    try:
+        # Get the current date and the opening day date for the season
+        current_date = datetime.today().strftime('%Y-%m-%d')
+        opening_day_date = '2024-03-28'
+        
+        # Fetch the original arsenal data for the year 2024
+        arsenal_data = pb.statcast_pitcher_arsenal_stats(2024)
+        
+        if arsenal_data.empty:
+            return jsonify({"error": "No arsenal data found for the specified year"}), 404
+        
+        # Filter the arsenal data to only include the specified player_id
+        player_arsenal_data = arsenal_data[arsenal_data['player_id'] == player_id]
+        
+        if player_arsenal_data.empty:
+            return jsonify({"error": "No arsenal data found for the specified player_id"}), 404
+        
+        # Fetch pitch-by-pitch data for the specified date range
+        player_stats = pb.statcast_pitcher(opening_day_date, current_date, player_id)
+        
+        if player_stats.empty:
+            return jsonify({"error": "No pitch data found for the specified date range"}), 404
+        
+        
+        # Ensure the necessary columns are present in both datasets
+        required_pitch_stats_columns = ['pitch_type', 'release_speed', 'pfx_x', 'pfx_z']
+        
+        if not all(col in player_stats.columns for col in required_pitch_stats_columns):
+            return jsonify({"error": "Required columns not found in the pitch data."}), 400
+        
+        
+        # Calculate the average velocity for each pitch type
+        pitch_velocities = player_stats.groupby('pitch_type')['release_speed'].mean().reset_index()
+        pitch_velocities = pitch_velocities.rename(columns={'release_speed': 'average_velocity'})
+        
+        # Calculate average pitch movement (pfx_x and pfx_z) for each pitch type
+        pitch_movement_x = player_stats.groupby('pitch_type')['pfx_x'].mean().reset_index()
+        pitch_movement_x = pitch_movement_x.rename(columns={'pfx_x': 'average_horizontal_movement'})
+        
+        pitch_movement_z = player_stats.groupby('pitch_type')['pfx_z'].mean().reset_index()
+        pitch_movement_z = pitch_movement_z.rename(columns={'pfx_z': 'average_vertical_movement'})
+        
 
+        
+        # Convert the processed data to dictionary format
+        pitch_velocities_dict = pitch_velocities.to_dict(orient='records')
+        pitch_movement_x_dict = pitch_movement_x.to_dict(orient='records')
+        pitch_movement_z_dict = pitch_movement_z.to_dict(orient='records')
+        
+        # Combine the original arsenal data with the calculated statistics
+        response_data = {
+            "original_arsenal": player_arsenal_data.to_dict(orient='records'),
+            "pitch_velocities": pitch_velocities_dict,
+            "pitch_movement_x": pitch_movement_x_dict,
+            "pitch_movement_z": pitch_movement_z_dict,
+        }
+        
+        return jsonify(response_data), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/stats/pitcher/recent/<int:player_id>', methods=['GET'])
+def get_recent_pitcher_stats(player_id):
+    try:
+        # Calculate the current date and the date two weeks ago
+        end_date = datetime.today().strftime('%Y-%m-%d')
+        start_date = (datetime.today() - timedelta(weeks=2)).strftime('%Y-%m-%d')
+
+        # Fetch player stats using the calculated date range
+        player_stats = pb.statcast_pitcher(start_date, end_date, player_id)
+        
+        # Sort by game_date or game_pk and select the last three unique game_pk values
+        last_three_game_pks = player_stats.sort_values(by='game_pk', ascending=False)['game_pk'].unique()[:3]
+        
+        # Filter the DataFrame to include only the rows with these game_pk values
+        last_three_games = player_stats[player_stats['game_pk'].isin(last_three_game_pks)]
+        
+        grouped_data = last_three_games.groupby('game_pk')
+
+        result = {game_pk: group.to_dict(orient='records') for game_pk, group in grouped_data}
+        
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route('/stats/pitcher/by_count/<int:player_id>', methods=['GET'])
-def get_player_stats(player_id):
+def get_pitcher_stats(player_id):
     try:
+        current_date = datetime.today().strftime('%Y-%m-%d')
+        opening_day_date = '2024-03-28'  
         # Fetch pitcher data for the specified date range
-        player_stats = pb.statcast_pitcher('2024-03-28', '2024-08-09', player_id)
+        player_stats = pb.statcast_pitcher(opening_day_date, current_date, player_id)
         
         # Ensure 'balls', 'strikes', 'pitch_type', and 'type' columns are in the DataFrame
         required_columns = ['balls', 'strikes', 'pitch_type', 'type', 'events']
@@ -152,6 +203,8 @@ def get_player_stats(player_id):
         return jsonify(stats), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+
 
 if __name__ == '__main__':
     app.run(debug=True)
