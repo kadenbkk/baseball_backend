@@ -1,4 +1,5 @@
 from flask import Flask, jsonify
+from flask_cors import CORS
 import pybaseball as pb
 import pandas as pd
 from datetime import datetime, timedelta
@@ -6,6 +7,7 @@ from pybaseball import statcast_pitcher_spin
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app)  # This will enable CORS for all routes
 
 @app.route('/')
 def home():
@@ -134,7 +136,6 @@ def get_recent_pitcher_stats(player_id):
         grouped_data = last_three_games.groupby('game_pk')
 
         result = {game_pk: group.to_dict(orient='records') for game_pk, group in grouped_data}
-        
         return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -158,8 +159,6 @@ def get_pitcher_stats(player_id):
         # Group by count scenario and pitch type, and get the count of each combination
         count_pitch_distribution = player_stats.groupby(['count_scenario', 'pitch_type']).size().unstack(fill_value=0)
         count_result = player_stats.groupby(['count_scenario', 'pitch_type', 'type']).size().unstack(fill_value=0)
-        
-        unique_events = player_stats.groupby(['count_scenario', 'pitch_type'])['events'].unique()
 
         count_result_ball = count_result.get('B', pd.Series(0, index=count_result.index, dtype=int))
         count_result_strike = count_result.get('S', pd.Series(0, index=count_result.index, dtype=int))
@@ -190,9 +189,7 @@ def get_pitcher_stats(player_id):
                 strike_percent = count_strike_percentage.get(count_scenario, pd.Series(0)).get(pitch_type, 0)
                 in_play_percent = count_in_play_percentage.get(count_scenario, pd.Series(0)).get(pitch_type, 0)
                 total_pitch_percentage = pitch_percentages.loc[count_scenario, pitch_type] if not pitch_percentages.empty else 0
-                events_list = unique_events.get((count_scenario, pitch_type), [])
                 stats[count_scenario][pitch_type] = {
-                    'unique_events': list(events_list),
                     'total_pitch_count': count,
                     'total_pitch_percentage': round(total_pitch_percentage,2),
                     'ball_percentage': round(float(ball_percent), 2),
