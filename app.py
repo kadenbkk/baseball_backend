@@ -4,10 +4,11 @@ import pybaseball as pb
 import pandas as pd
 from datetime import datetime, timedelta
 from pybaseball import statcast_pitcher_spin
-
+from pybaseball import cache
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # This will enable CORS for all routes
+cache.enable()
 
 
 @app.route('/')
