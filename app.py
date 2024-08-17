@@ -5,6 +5,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pybaseball import statcast_pitcher_spin
 from pybaseball import cache
+import numpy as np
+
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # This will enable CORS for all routes
@@ -115,6 +117,9 @@ def check_player_stats(player_id):
         if not all(col in player_stats.columns for col in required_columns):
             return jsonify({"error": "Required columns not found in the data."}), 400
 
+        # Calculate the hypotenuse of pfx_x and pfx_z
+        player_stats['pfx_hypotenuse'] = np.sqrt(player_stats['pfx_x']**2 + player_stats['pfx_z']**2)
+        
         # Group by pitch type and calculate stats
         def calculate_stats(group):
             total_pitches = len(group)
@@ -142,6 +147,9 @@ def check_player_stats(player_id):
             # Average Spin Axis
             avg_spin_axis = group['spin_axis'].mean()
 
+            # Average Hypotenuse
+            avg_pfx_hypotenuse = group['pfx_hypotenuse'].mean()
+
             return pd.Series({
                 'Total Pitches': total_pitches,
                 'Avg Velocity': avg_velo_rate,
@@ -151,6 +159,7 @@ def check_player_stats(player_id):
                 'HardHit%': hardhit,
                 'Avg Spin Rate': avg_spin_rate,
                 'Avg Spin Axis': avg_spin_axis,
+                'Avg PFX Hypotenuse': avg_pfx_hypotenuse
             })
 
         # Group by 'pitch_type' and apply the calculate_stats function
@@ -166,7 +175,6 @@ def check_player_stats(player_id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-
 @app.route('/stats/pitcher/recent/<int:player_id>', methods=['GET'])
 def get_recent_pitcher_stats(player_id):
     try:
@@ -288,6 +296,108 @@ def get_pitcher_stats(player_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
+@app.route('/stats/pitcher/hit_outcome/<int:player_id>', methods=['GET'])
+def get_hit_result(player_id):
+    try:
+        current_date = datetime.today().strftime('%Y-%m-%d')
+        opening_day_date = '2024-03-28'
+        
+        # Fetch pitcher data for the specified date range
+        player_stats = pb.statcast_pitcher(
+            opening_day_date, current_date, player_id)
+        
+        # Filter for hit outcomes
+        hit_outcomes = player_stats[
+            player_stats['description'].isin(['hit_into_play'])
+        ][['launch_angle', 'bb_type', 'launch_speed', 'launch_speed_angle', 'hc_x', 'hc_y', 'hit_distance_sc', 'events']]
+        
+        if hit_outcomes.empty:
+            return jsonify({"message": "No hit outcomes found for this player."}), 404
+        
+        # Calculate summary statistics
+        summary = {
+            "total_hits": hit_outcomes.shape[0],
+            "hits_by_type": hit_outcomes['events'].value_counts().to_dict(),
+            "mean_launch_speed": hit_outcomes['launch_speed'].mean(),
+            "std_dev_launch_speed": hit_outcomes['launch_speed'].std(),
+            "min_launch_speed": hit_outcomes['launch_speed'].min(),
+            "max_launch_speed": hit_outcomes['launch_speed'].max(),
+            "mean_launch_angle": hit_outcomes['launch_angle'].mean(),
+            "std_dev_launch_angle": hit_outcomes['launch_angle'].std(),
+            "min_launch_angle": hit_outcomes['launch_angle'].min(),
+            "max_launch_angle": hit_outcomes['launch_angle'].max(),
+            "mean_hit_distance": hit_outcomes['hit_distance_sc'].mean(),
+            "std_dev_hit_distance": hit_outcomes['hit_distance_sc'].std(),
+            "min_hit_distance": hit_outcomes['hit_distance_sc'].min(),
+            "max_hit_distance": hit_outcomes['hit_distance_sc'].max(),
+        }
+        
+        # Convert hit outcomes DataFrame to a list of dictionaries
+        hit_outcomes_list = hit_outcomes.to_dict(orient='records')
+        
+        # Return both the summary and detailed hit outcomes
+        return jsonify({"summary": summary, "hit_outcomes": hit_outcomes_list}), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route('/stats/pitcher/progression/<int:player_id>', methods=['GET'])
+def get_progression(player_id):
+    try:
+        current_date = datetime.today().strftime('%Y-%m-%d')
+        opening_day_date = '2024-03-28'
+        
+        # Fetch pitcher data for the specified date range
+        player_stats = pb.statcast_pitcher(
+            opening_day_date, current_date, player_id)
+        
+        # Filter for relevant columns
+        relevant_stats = player_stats[['game_date', 'pitch_type', 'release_speed', 'release_spin_rate', 'spin_axis', 
+                                       'release_extension', 'pfx_x', 'pfx_z', 'description']]
+        
+        if relevant_stats.empty:
+            return jsonify({"message": "No data found for this player."}), 404
+        
+        # Calculate the hypotenuse of pfx_x and pfx_z using the Pythagorean theorem
+        relevant_stats['pfx_hypotenuse'] = np.sqrt(relevant_stats['pfx_x']**2 + relevant_stats['pfx_z']**2)
+        
+        # Calculate strike percentage by game
+        relevant_stats['is_strike'] = relevant_stats['description'].isin(['called_strike', 'swinging_strike', 'foul', 'foul_tip', 'swinging_strike_blocked'])
+        strike_percentage = relevant_stats.groupby('game_date').agg({
+            'is_strike': 'mean'
+        }).reset_index()
+        strike_percentage['strike_percentage'] = strike_percentage['is_strike'] * 100
+        strike_percentage = strike_percentage[['game_date', 'strike_percentage']]
+        
+        # Group by game and pitch type, then calculate mean velocity, spin rate, spin axis, release extension, pfx_x, pfx_z, and pfx_hypotenuse
+        grouped_stats = relevant_stats.groupby(['game_date', 'pitch_type']).agg({
+            'release_speed': 'mean',
+            'release_spin_rate': 'mean',
+            'spin_axis': 'mean',
+            'release_extension': 'mean',
+            'pfx_x': 'mean',
+            'pfx_z': 'mean',
+            'pfx_hypotenuse': 'mean'  # Mean hypotenuse
+        }).reset_index()
+        
+        # Flatten the MultiIndex columns
+        grouped_stats.columns = [
+            'game_date', 'pitch_type', 'mean_release_speed', 'mean_release_spin_rate', 
+            'mean_spin_axis', 'mean_release_extension', 'mean_pfx_x', 'mean_pfx_z', 'mean_pfx_hypotenuse'
+        ]
+        
+        # Merge strike percentage with the grouped stats
+        progression_data = grouped_stats.merge(strike_percentage, on='game_date', how='left')
+        
+        # Convert the grouped data to a list of dictionaries
+        progression_data = progression_data.to_dict(orient='records')
+        
+        # Return the progression data grouped by game and pitch type
+        return jsonify({"progression": progression_data}), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
     app.run(debug=True)
