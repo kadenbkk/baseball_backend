@@ -23,9 +23,10 @@ def get_player_names():
         ids_str = request.args.get('ids', '')
         if not ids_str:
             return jsonify({"error": "No IDs provided"}), 400
-        
+
         # Convert the list of IDs from strings to integers
-        ids = [int(id_str) for id_str in ids_str.split(',') if id_str.isdigit()]
+        ids = [int(id_str)
+               for id_str in ids_str.split(',') if id_str.isdigit()]
 
         # Use playerid_reverse_lookup with 'mlbam' key_type
         player_info = pb.playerid_reverse_lookup(ids, key_type='mlbam')
@@ -38,13 +39,14 @@ def get_player_names():
                 last_name = row['name_last'].capitalize()
                 player_name = f"{first_name} {last_name}"
                 player_names[row['key_mlbam']] = player_name
-            
+
             return jsonify({"player_names": player_names}), 200
         else:
             return jsonify({"error": "Players not found"}), 404
     except Exception as e:
         # Return an error message if something goes wrong
         return jsonify({"error": str(e)}), 400
+
 
 @app.route('/id/<string:firstName>/<string:lastName>', methods=['GET'])
 def get_player_id(firstName, lastName):
@@ -97,66 +99,73 @@ def check_player_stats(player_id):
         current_date = datetime.today().strftime('%Y-%m-%d')
         opening_day_date = '2024-03-28'
 
-        # Fetch the original arsenal data for the year 2024
-        arsenal_data = pb.statcast_pitcher_arsenal_stats(2024)
-
-        if arsenal_data.empty:
-            return jsonify({"error": "No arsenal data found for the specified year"}), 404
-
-        # Filter the arsenal data to only include the specified player_id
-        player_arsenal_data = arsenal_data[arsenal_data['player_id'] == player_id]
-
-        if player_arsenal_data.empty:
-            return jsonify({"error": "No arsenal data found for the specified player_id"}), 404
-
         # Fetch pitch-by-pitch data for the specified date range
-        player_stats = pb.statcast_pitcher(
-            opening_day_date, current_date, player_id)
-
+        player_stats = pb.statcast_pitcher(opening_day_date, current_date, player_id)
+        print("player stat length: ", player_stats.shape[0])
         if player_stats.empty:
             return jsonify({"error": "No pitch data found for the specified date range"}), 404
 
-        # Ensure the necessary columns are present in both datasets
-        required_pitch_stats_columns = [
-            'pitch_type', 'release_speed', 'pfx_x', 'pfx_z']
+        # Ensure the necessary columns are present in the dataset
+        required_columns = [
+            'pitch_type', 'release_speed', 'pfx_x', 'pfx_z', 'balls', 'strikes', 'type', 'events',
+            'estimated_ba_using_speedangle', 'estimated_woba_using_speedangle', 'bb_type',
+            'launch_speed', 'spin_axis', 'release_spin_rate', 'description'
+        ]
 
-        if not all(col in player_stats.columns for col in required_pitch_stats_columns):
-            return jsonify({"error": "Required columns not found in the pitch data."}), 400
+        if not all(col in player_stats.columns for col in required_columns):
+            return jsonify({"error": "Required columns not found in the data."}), 400
 
-        # Calculate the average velocity for each pitch type
-        pitch_velocities = player_stats.groupby(
-            'pitch_type')['release_speed'].mean().reset_index()
-        pitch_velocities = pitch_velocities.rename(
-            columns={'release_speed': 'average_velocity'})
+        # Group by pitch type and calculate stats
+        def calculate_stats(group):
+            total_pitches = len(group)
+            balls_in_play = group[group['description'] == 'hit_into_play'].shape[0]
+            total_at_bats = group[group['events'].notna()].shape[0]
+            print("total at bats" , total_at_bats)
+            # Batting Average (BA) = Hits / Balls in Play
+            ba = group[group['events'].isin(['single', 'double', 'triple', 'home_run'])].shape[0] / balls_in_play if balls_in_play > 0 else 0
 
-        # Calculate average pitch movement (pfx_x and pfx_z) for each pitch type
-        pitch_movement_x = player_stats.groupby(
-            'pitch_type')['pfx_x'].mean().reset_index()
-        pitch_movement_x = pitch_movement_x.rename(
-            columns={'pfx_x': 'average_horizontal_movement'})
+            # Whiff% = Swings and Misses / Total Pitches
+            whiff = group[(group['description'] == 'swinging_strike')].shape[0] / total_pitches if total_pitches > 0 else 0
 
-        pitch_movement_z = player_stats.groupby(
-            'pitch_type')['pfx_z'].mean().reset_index()
-        pitch_movement_z = pitch_movement_z.rename(
-            columns={'pfx_z': 'average_vertical_movement'})
+            # Slugging Percentage (SLG) = Total Bases / Total At Bats
+            slug = (
+                group['events'].apply(lambda x: 1 if x == 'single' else (2 if x == 'double' else (3 if x == 'triple' else 4 if x=='home_run' else 0)))
+            ).sum() / total_at_bats if total_at_bats > 0 else 0
 
-        # Convert the processed data to dictionary format
-        pitch_velocities_dict = pitch_velocities.to_dict(orient='records')
-        pitch_movement_x_dict = pitch_movement_x.to_dict(orient='records')
-        pitch_movement_z_dict = pitch_movement_z.to_dict(orient='records')
+            # HardHit% = Balls hit with launch_speed > 95 mph / Balls in Play
+            hardhit = group[(group['launch_speed'] > 95) & (group['description'] == 'hit_into_play')].shape[0] / balls_in_play if balls_in_play > 0 else 0
 
-        # Combine the original arsenal data with the calculated statistics
+            # Average Spin Rate
+            avg_spin_rate = group['release_spin_rate'].mean()
+            avg_velo_rate = group['release_speed'].mean()
+
+            # Average Spin Axis
+            avg_spin_axis = group['spin_axis'].mean()
+
+            return pd.Series({
+                'Total Pitches': total_pitches,
+                'Avg Velocity': avg_velo_rate,
+                'BA': ba,
+                'Whiff%': whiff,
+                'SLG': slug,
+                'HardHit%': hardhit,
+                'Avg Spin Rate': avg_spin_rate,
+                'Avg Spin Axis': avg_spin_axis,
+            })
+
+        # Group by 'pitch_type' and apply the calculate_stats function
+        stats_by_pitch_type = player_stats.groupby('pitch_type').apply(calculate_stats).reset_index()
+        stats_by_pitch_type_dict = stats_by_pitch_type.to_dict(orient='records')
+
+        # Combine the calculated statistics with the pitch arsenal data
         response_data = {
-            "original_arsenal": player_arsenal_data.to_dict(orient='records'),
-            "pitch_velocities": pitch_velocities_dict,
-            "pitch_movement_x": pitch_movement_x_dict,
-            "pitch_movement_z": pitch_movement_z_dict,
+            "data": stats_by_pitch_type_dict,
         }
 
         return jsonify(response_data), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 400
-
 
 @app.route('/stats/pitcher/recent/<int:player_id>', methods=['GET'])
 def get_recent_pitcher_stats(player_id):
